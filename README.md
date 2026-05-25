@@ -4,7 +4,7 @@
 
 MCP server for controlling [Homey Pro](https://homey.app/) smart home systems through the [Model Context Protocol](https://modelcontextprotocol.io/).
 
-43 tools and 3 knowledge prompts for device control, automation, monitoring, troubleshooting, and more.
+48 tools and 3 knowledge prompts for device control, automation, monitoring, troubleshooting, and more.
 
 ## Quick Start
 
@@ -78,6 +78,16 @@ export HOMEY_TOKEN=your-api-key
 | `restart_app` | Restart a Homey app |
 | `enable_app` | Enable or disable an app |
 | `uninstall_app` | Uninstall an app |
+
+### HomeyScript
+
+| Tool | Description |
+|------|-------------|
+| `list_scripts` | List all HomeyScripts (id, name, last execution) |
+| `get_script` | Get a script's source code and metadata |
+| `upsert_script` | Create or overwrite a script |
+| `run_script` | Execute a stored script, optionally with an argument |
+| `delete_script` | Permanently delete a script |
 
 ### Insights & Energy
 

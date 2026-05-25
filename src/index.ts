@@ -7,7 +7,7 @@ import { getHomeyApi } from "./homey.js";
 
 const server = new McpServer({
   name: "homey-mcp",
-  version: "2.0.0",
+  version: "2.1.0",
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -245,6 +245,102 @@ server.registerTool("uninstall_app", {
 }, async ({ id }) => {
   const api = await getHomeyApi();
   await api.apps.uninstallApp({ id });
+  return json({ success: true, id });
+});
+
+// ── HomeyScript ──────────────────────────────────────────────────────
+// Requires the HomeyScript app (com.athom.homeyscript) to be installed.
+// Exposes the app's internal REST routes via api.call:
+//   GET    /api/app/com.athom.homeyscript/script          — list
+//   GET    /api/app/com.athom.homeyscript/script/:id      — read
+//   PUT    /api/app/com.athom.homeyscript/script/:id      — create/update
+//   POST   /api/app/com.athom.homeyscript/script/:id/run  — execute stored script
+//   DELETE /api/app/com.athom.homeyscript/script/:id      — delete
+
+const HOMEYSCRIPT_BASE = "/api/app/com.athom.homeyscript";
+
+server.registerTool("list_scripts", {
+  title: "List HomeyScripts",
+  description: "List all HomeyScript scripts. Returns id, name, version, and last execution time. HomeyScript lets you run JavaScript against the Homey API from a flow or on demand.",
+  annotations: READ,
+}, async () => {
+  const api = await getHomeyApi();
+  const scripts = await api.call({ method: "GET", path: `${HOMEYSCRIPT_BASE}/script` });
+  const arr = Object.values(scripts) as Array<{ id: string; name: string; version?: number; lastExecuted?: string | null }>;
+  return json({
+    total: arr.length,
+    scripts: arr.map((s) => ({ id: s.id, name: s.name, version: s.version, lastExecuted: s.lastExecuted })),
+  });
+});
+
+server.registerTool("get_script", {
+  title: "Get HomeyScript",
+  description: "Get a HomeyScript's full source code and metadata. Use list_scripts to discover IDs.",
+  inputSchema: { id: z.string().describe("Script ID (slug or UUID)") },
+  annotations: READ,
+}, async ({ id }) => {
+  const api = await getHomeyApi();
+  try {
+    const script = await api.call({ method: "GET", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
+    return json(script);
+  } catch (e: any) {
+    return err(`Script ${id} not found: ${e.message}`);
+  }
+});
+
+server.registerTool("upsert_script", {
+  title: "Create/Update HomeyScript",
+  description: "Create a new HomeyScript or overwrite an existing one. Pass the `id` of an existing script to update it, or omit `id` to create a new script (the server assigns a UUID). HomeyScript code runs in a sandboxed environment with access to the global `Homey` API object and `log()`. Return a value with `return <x>` to expose it to the calling flow.",
+  inputSchema: {
+    id: z.string().optional().describe("Existing script ID to update. Omit to create a new script — the server will assign a UUID."),
+    name: z.string().describe("Human-readable script name"),
+    code: z.string().describe("JavaScript source code. Has access to the `Homey` API global, `log()`, and standard async/await."),
+  },
+  annotations: WRITE,
+}, async ({ id, name, code }) => {
+  const api = await getHomeyApi();
+  if (id) {
+    const result = await api.call({
+      method: "PUT",
+      path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}`,
+      body: { name, code },
+    });
+    return json({ success: true, action: "updated", id, ...result });
+  }
+  const result = await api.call({
+    method: "POST",
+    path: `${HOMEYSCRIPT_BASE}/script`,
+    body: { name, code },
+  });
+  return json({ success: true, action: "created", ...result });
+});
+
+server.registerTool("run_script", {
+  title: "Run HomeyScript",
+  description: "Execute a stored HomeyScript and return its result. Returns `{ success, returns }` where `returns` is the script's return value, or `{ success: false, returns: { message, stack } }` on failure.",
+  inputSchema: {
+    id: z.string().describe("Script ID to run"),
+    argument: z.string().optional().describe("Optional argument string passed to the script as `args[0]`"),
+  },
+  annotations: WRITE,
+}, async ({ id, argument }) => {
+  const api = await getHomeyApi();
+  const result = await api.call({
+    method: "POST",
+    path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}/run`,
+    body: argument !== undefined ? { argument } : {},
+  });
+  return json(result);
+});
+
+server.registerTool("delete_script", {
+  title: "Delete HomeyScript",
+  description: "Permanently delete a HomeyScript. Any flows still referencing it will become broken.",
+  inputSchema: { id: z.string().describe("Script ID to delete") },
+  annotations: DESTRUCTIVE,
+}, async ({ id }) => {
+  const api = await getHomeyApi();
+  await api.call({ method: "DELETE", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
   return json({ success: true, id });
 });
 
