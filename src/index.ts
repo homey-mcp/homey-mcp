@@ -492,7 +492,14 @@ server.registerTool("create_notification", {
   annotations: WRITE,
 }, async ({ excerpt }) => {
   const api = await getHomeyApi();
-  await api.notifications.createNotification({ excerpt });
+  // homey-api's web client exposes no notifications.createNotification (only
+  // the HomeyScript sandbox and flows can post), so run the built-in flow-card
+  // action instead — the same route the deployed Season Controller uses.
+  await api.flow.runFlowCardAction({
+    uri: "homey:manager:notifications",
+    id: "homey:manager:notifications:create_notification",
+    args: { text: excerpt },
+  });
   return json({ success: true, excerpt });
 });
 
