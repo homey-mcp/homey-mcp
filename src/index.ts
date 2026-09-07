@@ -350,6 +350,11 @@ server.registerTool("run_script", {
     method: "POST",
     path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}/run`,
     body: argument !== undefined ? { argument } : {},
+    // HomeyScripts that actuate slow cloud devices (e.g. a Panasonic AC whose
+    // setCapabilityValue round-trips ~7.5s) can legitimately run well past the
+    // client's 10s default fetch timeout while completing fine server-side.
+    // Give run a 60s ceiling so the tool returns the real result, not a 408.
+    $timeout: 60000,
   });
   return json(result);
 });
