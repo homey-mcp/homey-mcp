@@ -162,10 +162,137 @@ server.registerTool("list_flows", {
   const flows = Object.values(await api.flow.getFlows()) as any[];
   let advancedFlows: any[] = [];
   try { advancedFlows = Object.values(await api.flow.getAdvancedFlows()) as any[]; } catch { /* may not be available */ }
+  let folders: Record<string, any> = {};
+  try { folders = await api.flow.getFlowFolders(); } catch { /* older firmware */ }
+  const folderName = (f: any) => folders[f.folder]?.name ?? null;
   return json({
-    flows: flows.map((f) => ({ id: f.id, name: f.name, enabled: f.enabled, broken: f.broken, type: "simple" })),
-    advancedFlows: advancedFlows.map((f) => ({ id: f.id, name: f.name, enabled: f.enabled, broken: f.broken, type: "advanced" })),
+    flows: flows.map((f) => ({ id: f.id, name: f.name, folder: folderName(f), enabled: f.enabled, broken: f.broken, type: "simple" })),
+    advancedFlows: advancedFlows.map((f) => ({ id: f.id, name: f.name, folder: folderName(f), enabled: f.enabled, broken: f.broken, type: "advanced" })),
   });
+});
+
+// Homey resolves a token reference as `<ownerUri>|<tokenId>` (pipe). A reference
+// written `<ownerUri>:<tokenId>` (colon) is accepted by the API, never flagged as
+// broken, and fails at run time with "Missing token value" — the condition then
+// silently stops the flow. Found on 2026-09-06 in ~70 conditions here.
+const MALFORMED_DROPTOKEN = "token reference uses ':' instead of '|' (ownerUri|tokenId); Homey cannot resolve it and this card never passes — fix with audit_flows/updateFlow";
+// A simple-flow action without `group` runs on the ELSE path as well as the THEN
+// path, i.e. regardless of the AND conditions. The app always writes
+// `group: "then"`; API-created flows often omit it. Verified 2026-09-06 with
+// real triggers: then-only actions gate correctly, group-less ones do not.
+const MISSING_ACTION_GROUP = "action has no `group`; Homey runs it whether the AND conditions are true or false — set group: \"then\" (or \"else\")";
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+server.registerTool("audit_flows", {
+  title: "Audit Flows",
+  description: "Scan every flow for silent defects Homey does not flag as broken: actions without a `group` (they run whether the AND conditions are true or false), token references with the wrong separator (the condition errors and the flow aborts), autocomplete arguments stored as plain strings (never match), references to missing or unavailable devices, missing logic variables, disabled flows, and trigger arguments the current flow card no longer declares (stale after an app update). Read-only. Returns findings grouped by kind with flow names and ids; fix token references by re-saving the flow with `ownerUri|tokenId`.",
+  annotations: READ,
+}, async () => {
+  const api = await getHomeyApi();
+  const [flows, devices, variables] = await Promise.all([api.flow.getFlows(), api.devices.getDevices(), api.logic.getVariables()]);
+  const out = { total: Object.keys(flows).length, broken: [] as any[], disabled: [] as any[], actionsWithoutGroup: [] as any[], malformedTokenReferences: [] as any[], plainAutocompleteArgs: [] as any[], missingDevices: [] as any[], unavailableDevices: [] as any[], missingVariables: [] as any[], staleTriggerArgs: [] as any[] };
+  const cardDefs = new Map<string, any>();
+  for (const f of Object.values(flows) as any[]) {
+    const ref = { id: f.id, name: f.name };
+    if (f.broken) out.broken.push(ref);
+    if (!f.enabled) out.disabled.push(ref);
+    const cards = [["when", f.trigger], ...(f.conditions ?? []).map((c: any) => ["and", c]), ...(f.actions ?? []).map((a: any) => ["then", a])] as [string, any][];
+    for (const [kind, c] of cards) {
+      if (!c) continue;
+      if (kind === "then" && !c.group) out.actionsWithoutGroup.push({ ...ref, action: c.id });
+      if (typeof c.droptoken === "string" && !c.droptoken.includes("|")) out.malformedTokenReferences.push({ ...ref, card: kind, droptoken: c.droptoken });
+      // autocomplete args must be the object the card's autocomplete returned; a plain string never matches
+      if (c.id && c.args) {
+        const key = `${kind}:${c.id}`;
+        if (!cardDefs.has(key)) {
+          const uri = c.uri ?? c.id.split(":").slice(0, -1).join(":");
+          const getter = kind === "when" ? api.flow.getFlowCardTrigger : kind === "and" ? api.flow.getFlowCardCondition : api.flow.getFlowCardAction;
+          cardDefs.set(key, await getter.call(api.flow, { uri, id: c.id }).catch(() => null));
+        }
+        const def = cardDefs.get(key);
+        for (const a of def?.args ?? []) {
+          const v = c.args[a.name];
+          if (a.type === "autocomplete" && v !== undefined && (typeof v !== "object" || v === null)) out.plainAutocompleteArgs.push({ ...ref, card: kind, cardId: c.id, arg: a.name, value: v });
+        }
+      }
+      for (const s of [c.uri, c.id, c.droptoken, ...Object.values(c.args ?? {}).filter((v) => typeof v === "string")] as string[]) {
+        if (!s) continue;
+        for (const m of s.matchAll(/homey:device:([0-9a-f-]{36})/g)) {
+          const d = devices[m[1]];
+          if (!d) out.missingDevices.push({ ...ref, card: kind, deviceId: m[1] });
+          else if (d.available === false) out.unavailableDevices.push({ ...ref, card: kind, device: d.name });
+        }
+        for (const m of s.matchAll(/homey:manager:logic[|:]([0-9a-f-]{36})/g)) if (!(variables as any)[m[1]]) out.missingVariables.push({ ...ref, card: kind, variableId: m[1] });
+      }
+    }
+    // stale trigger args: compare against the card definition the app currently publishes
+    const t = f.trigger;
+    if (t?.id && t.args && Object.keys(t.args).length) {
+      const def = cardDefs.get(`when:${t.id}`);
+      if (def?.args) {
+        const declared = new Set(def.args.map((a: any) => a.name));
+        const stale = Object.keys(t.args).filter((k) => !declared.has(k));
+        if (stale.length) out.staleTriggerArgs.push({ ...ref, trigger: t.id, staleArgs: stale, declared: [...declared] });
+      }
+    }
+  }
+  // dedupe device/variable findings per flow
+  const uniq = (arr: any[]) => Array.from(new Map(arr.map((x) => [JSON.stringify(x), x])).values());
+  out.missingDevices = uniq(out.missingDevices); out.unavailableDevices = uniq(out.unavailableDevices); out.missingVariables = uniq(out.missingVariables);
+  const summary = Object.fromEntries(Object.entries(out).filter(([k]) => k !== "total").map(([k, v]) => [k, (v as any[]).length]));
+  return json({ summary, ...out });
+});
+
+server.registerTool("get_flow", {
+  title: "Get Flow Definition",
+  description: "Get a flow's full WHEN/AND/THEN definition with device, zone and logic-variable references resolved to names. Each card shows its card id, arguments, the token it compares against (droptoken), whether it is inverted, and any delay. Use this to audit what a flow actually does — list_flows only returns names. Works for simple flows; advanced flows return their raw card graph.",
+  inputSchema: { id: z.string().describe("Flow ID (from list_flows)") },
+  annotations: READ,
+}, async ({ id }) => {
+  const api = await getHomeyApi();
+  const [devices, zones, variables] = await Promise.all([api.devices.getDevices(), api.zones.getZones(), api.logic.getVariables()]);
+  let folders: Record<string, any> = {};
+  try { folders = await api.flow.getFlowFolders(); } catch { /* older firmware */ }
+  // Resolve every UUID inside a URI/token string to "<uuid> (Name)".
+  const resolve = (s: unknown): unknown => typeof s === "string"
+    ? s.replace(UUID_RE, (u) => {
+        const hit = devices[u]?.name ?? zones[u]?.name ?? (variables as any)[u]?.name;
+        return hit ? `${u} (${hit})` : u;
+      })
+    : s;
+  const card = (c: any, isAction = false) => {
+    if (!c) return null;
+    const out: Record<string, unknown> = { id: resolve(c.id), uri: resolve(c.uri) };
+    if (c.args && Object.keys(c.args).length) out.args = c.args;
+    if (c.droptoken) {
+      out.droptoken = resolve(c.droptoken);
+      if (!String(c.droptoken).includes("|")) out.warning = MALFORMED_DROPTOKEN;
+    }
+    if (c.inverted) out.inverted = true;
+    if (c.group) out.group = c.group;
+    else if (isAction) out.warning = MISSING_ACTION_GROUP;
+    if (c.delay) out.delay = c.delay;
+    if (c.duration) out.duration = c.duration;
+    return out;
+  };
+  const flows = await api.flow.getFlows();
+  const f = flows[id];
+  if (f) {
+    return json({
+      id: f.id, name: f.name, type: "simple", folder: folders[f.folder]?.name ?? null,
+      enabled: f.enabled, broken: f.broken, triggerable: f.triggerable,
+      when: card(f.trigger), and: (f.conditions ?? []).map((c: any) => card(c)), then: (f.actions ?? []).map((a: any) => card(a, true)),
+    });
+  }
+  try {
+    const adv = (await api.flow.getAdvancedFlows())[id];
+    if (adv) {
+      const cards: Record<string, unknown> = {};
+      for (const [k, c] of Object.entries(adv.cards ?? {})) cards[k] = { ...card(c), type: (c as any).type, outputSuccess: (c as any).outputSuccess, outputError: (c as any).outputError };
+      return json({ id: adv.id, name: adv.name, type: "advanced", folder: folders[adv.folder]?.name ?? null, enabled: adv.enabled, broken: adv.broken, cards });
+    }
+  } catch { /* advanced flows unavailable */ }
+  return err(`Flow ${id} not found`);
 });
 
 server.registerTool("trigger_flow", {
