@@ -7,7 +7,7 @@ import { getHomeyApi, resetHomeyApi, isAuthError } from "./homey.js";
 
 const server = new McpServer({
   name: "homey-mcp",
-  version: "2.1.0",
+  version: "2.3.0",
 });
 
 // Self-heal wrapper: every tool handler acquires `api` via getHomeyApi() at its

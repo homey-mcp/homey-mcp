@@ -4,7 +4,7 @@
 
 MCP server for controlling [Homey Pro](https://homey.app/) smart home systems through the [Model Context Protocol](https://modelcontextprotocol.io/).
 
-48 tools and 3 knowledge prompts for device control, automation, monitoring, troubleshooting, and more.
+50 tools and 3 knowledge prompts for device control, automation, monitoring, troubleshooting, and more.
 
 ## Quick Start
 
@@ -64,7 +64,9 @@ export HOMEY_TOKEN=your-api-key
 | Tool | Description |
 |------|-------------|
 | `list_zones` | List all zones (rooms/areas) |
-| `list_flows` | List simple and advanced flows |
+| `list_flows` | List simple and advanced flows with folder and enabled/broken state |
+| `get_flow` | Full WHEN/AND/THEN definition of a flow, device and variable ids resolved to names; warns on unresolvable token references |
+| `audit_flows` | Scan all flows for silent defects: actions without `group` (run regardless of conditions), malformed token references, plain-string autocomplete args, missing/unavailable devices, missing variables, stale trigger arguments |
 | `trigger_flow` | Run a flow |
 | `set_flow_enabled` | Enable or disable a flow |
 
