@@ -3,12 +3,33 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getHomeyApi } from "./homey.js";
+import { getHomeyApi, resetHomeyApi, isAuthError } from "./homey.js";
 
 const server = new McpServer({
   name: "homey-mcp",
   version: "2.1.0",
 });
+
+// Self-heal wrapper: every tool handler acquires `api` via getHomeyApi() at its
+// top. If a cached local session expired, the first Homey call throws 401. We
+// reset the auth (memo + on-disk cache) and re-run the handler once against a
+// freshly authenticated API. A second failure is real and propagates.
+function withAuthRetry<A extends any[], R>(handler: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  return async (...args: A): Promise<R> => {
+    try {
+      return await handler(...args);
+    } catch (e) {
+      if (!isAuthError(e)) throw e;
+      resetHomeyApi();
+      return await handler(...args);
+    }
+  };
+}
+
+// Wrap registerTool so every handler gets auth self-heal transparently.
+const _registerTool = server.registerTool.bind(server);
+(server as any).registerTool = (name: string, config: any, handler: any) =>
+  _registerTool(name, config, withAuthRetry(handler) as any);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
