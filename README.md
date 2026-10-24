@@ -196,7 +196,7 @@ npm start          # Run compiled version
 
 ## Tech Stack
 
-- TypeScript + Node.js (≥20)
+- TypeScript + Node.js (≥22)
 - [homey-api](https://www.npmjs.com/package/homey-api) v3 — Official Homey Web API client
 - [@modelcontextprotocol/sdk](https://www.npmjs.com/package/@modelcontextprotocol/sdk) v1.32 — MCP server (`registerTool` with `ToolAnnotations`)
 - [zod](https://www.npmjs.com/package/zod) v4 — Parameter validation
