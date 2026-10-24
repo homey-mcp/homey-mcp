@@ -29,7 +29,16 @@ export function writeCacheFile(file: string, data: LocalCache): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   const tmp = `${file}.${process.pid}.tmp`;
-  const fd = fs.openSync(tmp, "w", 0o600);
+  // O_EXCL: never follow or truncate a file or symlink already at the temp
+  // path. A leftover from a crashed run is removed and the open retried once.
+  let fd: number;
+  try {
+    fd = fs.openSync(tmp, "wx", 0o600);
+  } catch (e: any) {
+    if (e?.code !== "EEXIST") throw e;
+    fs.unlinkSync(tmp);
+    fd = fs.openSync(tmp, "wx", 0o600);
+  }
   try {
     fs.writeSync(fd, JSON.stringify(data, null, 2));
   } finally {

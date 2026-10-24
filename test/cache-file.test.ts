@@ -43,3 +43,16 @@ test("readCacheFile deletes a corrupt or incomplete cache and returns null", () 
   assert.equal(fs.existsSync(incomplete), false);
   assert.equal(readCacheFile(path.join(dir, "missing.json")), null);
 });
+
+test("writeCacheFile does not follow a symlink planted at the temp path", () => {
+  const dir = tmp();
+  const file = path.join(dir, "cache.json");
+  const victim = path.join(dir, "victim.txt");
+  fs.writeFileSync(victim, "keep me");
+  fs.symlinkSync(victim, `${file}.${process.pid}.tmp`);
+  writeCacheFile(file, { address: "http://h", token: "t" });
+  assert.equal(fs.readFileSync(victim, "utf8"), "keep me");
+  assert.equal(fs.lstatSync(file).isSymbolicLink(), false);
+  assert.deepEqual(readCacheFile(file), { address: "http://h", token: "t" });
+  assert.equal(fs.existsSync(`${file}.${process.pid}.tmp`), false);
+});
