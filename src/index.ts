@@ -25,7 +25,7 @@ Writes change the physical home. Confirm with the user before unlocking, opening
 
 const server = new McpServer({
   name: "homey-mcp",
-  version: "2.3.0",
+  version: "2.4.0",
 }, { instructions: INSTRUCTIONS });
 
 // Wrap registerTool so every handler gets auth self-heal: on a Homey 401 the
