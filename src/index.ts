@@ -16,11 +16,14 @@ const server = new McpServer({
 // freshly authenticated API. A second failure is real and propagates.
 function withAuthRetry<A extends any[], R>(handler: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
   return async (...args: A): Promise<R> => {
+    // The instance the handler will use; a reset only applies if it is still
+    // current, so pipelined calls failing on one stale session re-auth once.
+    const api = await getHomeyApi();
     try {
       return await handler(...args);
     } catch (e) {
       if (!isAuthError(e)) throw e;
-      resetHomeyApi();
+      resetHomeyApi(api);
       return await handler(...args);
     }
   };
