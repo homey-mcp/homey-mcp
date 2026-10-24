@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ApiHolder, isAuthError, isNotFound, unlessAuth, isRetrySafe, isLanAddress, isGroupOrWorldAccessible, withAuthRetry } from "../src/lib/auth.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { cleanString } from "../src/lib/sanitize.js";
+import { ApiHolder, errorsAsResults, isAuthError, isNotFound, unlessAuth, isRetrySafe, isLanAddress, isGroupOrWorldAccessible, withAuthRetry } from "../src/lib/auth.js";
 
 test("isAuthError matches statusCode 401 and the exact session-not-found message only", () => {
   assert.equal(isAuthError({ statusCode: 401, message: "whatever" }), true);
@@ -123,9 +125,50 @@ test("withAuthRetry does not re-run a non-idempotent handler but still resets th
   let runs = 0; let resets = 0;
   const wrapped = withAuthRetry(async () => { runs++; throw { statusCode: 401, message: "Session not found" }; },
     { getApi: async () => ({}), reset: () => { resets++; return true; }, retrySafe: false });
-  await assert.rejects(wrapped(), /not re-run/);
+  await assert.rejects(wrapped(), (e: any) => /has been reset/.test(e.message) && /not re-run/.test(e.message) && !/401/.test(e.message));
   assert.equal(runs, 1);
   assert.equal(resets, 1);
+});
+
+test("withAuthRetry: the non-idempotent message does not claim a reset that did not happen", async () => {
+  const wrapped = withAuthRetry(async () => { throw { statusCode: 401 }; },
+    { getApi: async () => ({}), reset: () => false, retrySafe: false });
+  await assert.rejects(wrapped(), (e: any) => /fresh session is in use/.test(e.message) && !/has been reset/.test(e.message));
+});
+
+test("withAuthRetry pins the resolved instance, so reset and retry act on the instance the handler used", async () => {
+  const store = new AsyncLocalStorage<object>();
+  const a = { n: 1 }; const b = { n: 2 }; const c = { n: 3 };
+  let current: object = a;
+  const resets: object[] = []; const used: object[] = [];
+  const getApi = async () => store.getStore() ?? current;
+  const wrapped = withAuthRetry(async () => {
+    if (used.length === 0) current = b; // another call swaps the instance after the wrapper resolved `a`
+    const api = await getApi();
+    used.push(api);
+    if (used.length === 1) throw { statusCode: 401 };
+    return "ok";
+  }, {
+    getApi, retrySafe: true,
+    reset: (f) => { resets.push(f); if (f !== current) return false; current = c; return true; },
+    pin: (api, fn) => store.run(api, fn),
+  });
+  assert.equal(await wrapped(), "ok");
+  assert.equal(used[0], a, "the handler used the instance the wrapper resolved");
+  assert.deepEqual(resets, [a], "the reset targeted the instance that failed");
+  assert.equal(used[1], b, "the retry resolved the current instance afresh");
+});
+
+test("errorsAsResults turns thrown errors into cleaned results and lets auth errors through", async () => {
+  const toResult = (m: string) => ({ isError: true, text: cleanString(m, 2000) });
+  const failing = errorsAsResults(async () => { throw new Error("bad\u202e\u0007 script"); }, toResult);
+  const r = await failing() as { text: string };
+  assert.equal(r.text.includes("\u202e") || r.text.includes("\u0007"), false);
+  assert.match(r.text, /bad/);
+  const auth = errorsAsResults(async () => { throw { statusCode: 401 }; }, toResult);
+  await assert.rejects(auth(), (e: any) => e.statusCode === 401);
+  const ok = errorsAsResults(async () => "fine", toResult);
+  assert.equal(await ok(), "fine");
 });
 
 test("withAuthRetry passes other errors through untouched and does not reset", async () => {

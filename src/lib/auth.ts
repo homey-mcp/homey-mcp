@@ -31,26 +31,53 @@ export function isRetrySafe(annotations: { readOnlyHint?: boolean; idempotentHin
   return annotations?.readOnlyHint === true || annotations?.idempotentHint === true;
 }
 
-/** Self-heal wrapper. Resolves the instance first, runs the handler, and on a
- *  Homey auth rejection resets exactly that instance. A retry-safe handler is
- *  re-run once against a fresh session; any other handler is not re-run,
- *  because the rejection may have come after a side effect. A second failure
- *  propagates. */
+/** Self-heal wrapper. Resolves the instance first and runs the handler with it
+ *  pinned (`pin`), so the instance that failed is the one the handler used. On
+ *  a Homey auth rejection exactly that instance is reset. A retry-safe handler
+ *  is re-run once against a freshly resolved session; any other handler is not
+ *  re-run, because the rejection may have come after a side effect. A second
+ *  failure propagates. */
 export function withAuthRetry<A extends any[], R, T>(
   handler: (...args: A) => Promise<R>,
-  opts: { getApi: () => Promise<T>; reset: (failed: T) => boolean; retrySafe: boolean },
+  opts: {
+    getApi: () => Promise<T>;
+    reset: (failed: T) => boolean;
+    retrySafe: boolean;
+    pin?: (api: T, fn: () => Promise<R>) => Promise<R>;
+  },
 ): (...args: A) => Promise<R> {
+  const run = (api: T, args: A) => (opts.pin ? opts.pin(api, () => handler(...args)) : handler(...args));
   return async (...args: A): Promise<R> => {
     const api = await opts.getApi();
     try {
-      return await handler(...args);
+      return await run(api, args);
     } catch (e) {
       if (!isAuthError(e)) throw e;
-      opts.reset(api);
+      const didReset = opts.reset(api);
       if (!opts.retrySafe) {
-        throw new Error("The Homey session was rejected (401) and has been reset. This tool is not idempotent, so it was not re-run automatically: check whether it took effect before calling it again.");
+        const state = didReset
+          ? "The Homey session was rejected and has been reset."
+          : "The Homey session was rejected; another call had already replaced it, so a fresh session is in use.";
+        throw new Error(`${state} This tool is not idempotent, so it was not re-run automatically: check whether it took effect before calling it again.`);
       }
+      return await run(await opts.getApi(), args);
+    }
+  };
+}
+
+/** Outermost tool wrapper: an error a handler throws becomes a tool error
+ *  result built by `toResult` (which cleans and caps the text), instead of
+ *  reaching the client as raw SDK error text. Auth errors still propagate. */
+export function errorsAsResults<A extends any[], R, E>(
+  handler: (...args: A) => Promise<R>,
+  toResult: (message: string) => E,
+): (...args: A) => Promise<R | E> {
+  return async (...args: A): Promise<R | E> => {
+    try {
       return await handler(...args);
+    } catch (e: any) {
+      if (isAuthError(e)) throw e;
+      return toResult(String(e?.message ?? e?.description ?? e));
     }
   };
 }

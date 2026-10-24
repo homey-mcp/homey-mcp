@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { ApiHolder, isAuthError, isGroupOrWorldAccessible, isLanAddress } from "./lib/auth.js";
 import { readCacheFile, writeCacheFile } from "./lib/cache-file.js";
 
@@ -54,8 +55,18 @@ const holder = new ApiHolder<any>(authenticate, () => {
   if (currentSource !== "env") discardLocalCache();
 });
 
+// The instance a tool call resolved at its start. Inside withPinnedApi,
+// getHomeyApi() returns it, so a mid-call reset by another call cannot switch
+// the handler to a different instance than the one the self-heal wrapper resets.
+const pinned = new AsyncLocalStorage<any>();
+
 export function getHomeyApi(): Promise<any> {
-  return holder.get();
+  const api = pinned.getStore();
+  return api ? Promise.resolve(api) : holder.get();
+}
+
+export function withPinnedApi<R>(api: any, fn: () => Promise<R>): Promise<R> {
+  return pinned.run(api, fn);
 }
 
 /** Drop the memoised instance (and the on-disk LAN cache) so the next

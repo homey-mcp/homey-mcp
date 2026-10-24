@@ -3,8 +3,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getHomeyApi, resetHomeyApi } from "./homey.js";
-import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from "./lib/auth.js";
+import { getHomeyApi, resetHomeyApi, withPinnedApi } from "./homey.js";
+import { errorsAsResults, isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from "./lib/auth.js";
 import { READ, writeAnnotations } from "./lib/annotations.js";
 import { validateCapabilityWrite } from "./lib/capability.js";
 import { cleanString, sanitize } from "./lib/sanitize.js";
@@ -30,12 +30,14 @@ const server = new McpServer({
 
 // Wrap registerTool so every handler gets auth self-heal: on a Homey 401 the
 // failed session is reset, and read-only or idempotent tools are re-run once
-// against a fresh one. Every tool that is not read-only must have an entry in
-// the annotation table, so its retry and confirmation behaviour is explicit.
+// against a fresh one. Any other thrown error becomes a cleaned, capped tool
+// error via err(). Every tool that is not read-only must have an entry in the
+// annotation table, so its retry and confirmation behaviour is explicit.
 const _registerTool = server.registerTool.bind(server);
 (server as any).registerTool = (name: string, config: any, handler: any) => {
   if (config.annotations?.readOnlyHint !== true && !(name in ANN)) throw new Error(`tool ${name} has no annotations entry`);
-  return _registerTool(name, config, withAuthRetry(handler, { getApi: getHomeyApi, reset: resetHomeyApi, retrySafe: isRetrySafe(config.annotations) }) as any);
+  const healed = withAuthRetry(handler, { getApi: getHomeyApi, reset: resetHomeyApi, retrySafe: isRetrySafe(config.annotations), pin: withPinnedApi });
+  return _registerTool(name, config, errorsAsResults(healed, err) as any);
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
