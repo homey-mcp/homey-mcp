@@ -5,8 +5,11 @@ import { z } from "zod";
 // different endpoint than the tool intends. Every id is validated to its real
 // shape before it gets anywhere near a path.
 
-/** Devices, flows, zones, logic variables, alarms, moods, folders. */
-export const uuid = () => z.string().uuid();
+/** Devices, flows, zones, logic variables, alarms, moods, folders. Any
+ *  8-4-4-4-12 hex id, without the RFC version/variant check, so ids minted by
+ *  older firmware are not rejected. */
+export const uuid = () =>
+  z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "must be a UUID");
 
 /** Reverse-DNS app ids such as com.athom.homeyscript. */
 export const appId = () =>

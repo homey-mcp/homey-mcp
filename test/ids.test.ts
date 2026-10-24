@@ -6,6 +6,7 @@ const ok = (schema: any, v: unknown) => schema.safeParse(v).success;
 
 test("uuid ids accept a UUID and reject path traversal", () => {
   assert.equal(ok(uuid(), "5ca4bf89-67ab-4978-a355-da9e11c8cc05"), true);
+  assert.equal(ok(uuid(), "5CA4BF89-67AB-1978-0355-DA9E11C8CC05"), true, "no RFC version/variant check");
   assert.equal(ok(uuid(), "../../system/reboot?x="), false);
   assert.equal(ok(uuid(), "5ca4bf89-67ab-4978-a355-da9e11c8cc05/../x"), false);
   assert.equal(ok(uuid(), ""), false);
