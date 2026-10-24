@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getHomeyApi, resetHomeyApi } from "./homey.js";
 import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from "./lib/auth.js";
 import { READ, writeAnnotations } from "./lib/annotations.js";
+import { validateCapabilityWrite } from "./lib/capability.js";
 
 const ALLOW_SECURITY_CAPS = process.env.HOMEY_MCP_ALLOW_SECURITY_CAPS === "1";
 const ANN = writeAnnotations(ALLOW_SECURITY_CAPS);
@@ -113,7 +114,7 @@ server.registerTool("search_devices", {
 
 server.registerTool("set_device_capability", {
   title: "Control Device",
-  description: "Control a device by setting a capability value. Common capabilities: 'onoff' (boolean — turn on/off), 'dim' (number 0-1 — brightness), 'target_temperature' (number — thermostat setpoint), 'volume_set' (number 0-1). Use get_device first to see available capabilities and their current values.",
+  description: "Control a device by setting a capability value. Common capabilities: 'onoff' (boolean — turn on/off), 'dim' (number 0-1 — brightness), 'target_temperature' (number — thermostat setpoint), 'volume_set' (number 0-1). Use get_device first to see available capabilities and their current values. The value is checked against the capability's definition (must exist and be setable; type, min/max and enum values are enforced). Locks, garage doors and alarm capabilities are refused unless the server runs with HOMEY_MCP_ALLOW_SECURITY_CAPS=1.",
   inputSchema: {
     deviceId: z.string().describe("Device ID"),
     capability: z.string().describe("Capability ID (e.g. onoff, dim, target_temperature, volume_set)"),
@@ -125,6 +126,8 @@ server.registerTool("set_device_capability", {
   const devices = await api.devices.getDevices();
   const device = devices[deviceId];
   if (!device) return err(`Device ${deviceId} not found`);
+  const invalid = validateCapabilityWrite(device, capability, value, { allowSecurityCaps: ALLOW_SECURITY_CAPS });
+  if (invalid) return err(invalid);
   await device.setCapabilityValue({ capabilityId: capability, value });
   return json({ success: true, device: device.name, capability, value });
 });
