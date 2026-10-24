@@ -434,9 +434,9 @@ server.registerTool("run_script", {
     method: "POST",
     path: scriptPath(id, "run"),
     body: argument !== undefined ? { argument } : {},
-    // HomeyScripts that actuate slow cloud devices (e.g. a Panasonic AC whose
-    // setCapabilityValue round-trips ~7.5s) can legitimately run well past the
-    // client's 10s default fetch timeout while completing fine server-side.
+    // HomeyScripts that actuate slow cloud-connected devices can legitimately
+    // run well past the client's 10s default fetch timeout while completing
+    // fine server-side.
     // Give run a 60s ceiling so the tool returns the real result, not a 408.
     $timeout: 60000,
   });
@@ -578,8 +578,8 @@ server.registerTool("create_notification", {
 }, async ({ excerpt }) => {
   const api = await getHomeyApi();
   // homey-api's web client exposes no notifications.createNotification (only
-  // the HomeyScript sandbox and flows can post), so run the built-in flow-card
-  // action instead — the same route the deployed Season Controller uses.
+  // the HomeyScript sandbox and flows can post), so run the built-in
+  // create_notification flow-card action instead.
   await api.flow.runFlowCardAction({
     uri: "homey:manager:notifications",
     id: "homey:manager:notifications:create_notification",
