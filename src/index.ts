@@ -8,9 +8,11 @@ import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from 
 import { READ, writeAnnotations } from "./lib/annotations.js";
 import { validateCapabilityWrite } from "./lib/capability.js";
 import { cleanString, sanitize } from "./lib/sanitize.js";
+import { coarseLocation, pickSystemInfo } from "./lib/privacy.js";
 import { appId, insightLogId, isoDate, scriptId, scriptPath, uuid } from "./lib/ids.js";
 
 const ALLOW_SECURITY_CAPS = process.env.HOMEY_MCP_ALLOW_SECURITY_CAPS === "1";
+const PRECISE_LOCATION = process.env.HOMEY_MCP_PRECISE_LOCATION === "1";
 const ANN = writeAnnotations(ALLOW_SECURITY_CAPS);
 
 const INSTRUCTIONS = `Tools for a Homey Pro smart home.
@@ -714,16 +716,16 @@ server.registerTool("set_mood", {
 
 server.registerTool("get_system_info", {
   title: "System Information",
-  description: "Get Homey system information including software version, hostname, Wi-Fi network, and hardware details.",
+  description: "Get Homey system information: software version, model, time zone, uptime, memory and load, and whether Wi-Fi/Ethernet are connected. Network identifiers (SSID, MAC and IP addresses, gateway, DNS), the hostname and the cloud id are not returned.",
   annotations: READ,
 }, async () => {
   const api = await getHomeyApi();
-  return json(await api.system.getInfo());
+  return json(pickSystemInfo(await api.system.getInfo()));
 });
 
 server.registerTool("get_location", {
   title: "Get Location",
-  description: "Get Homey's configured geographic location (address and GPS coordinates). Used for sunrise/sunset calculations and weather.",
+  description: "Get Homey's configured geographic location, used for sunrise/sunset and weather. Coordinates are rounded to 2 decimals (about 1 km) and the street address is withheld unless the server runs with HOMEY_MCP_PRECISE_LOCATION=1.",
   annotations: READ,
 }, async () => {
   const api = await getHomeyApi();
@@ -731,7 +733,7 @@ server.registerTool("get_location", {
     api.geolocation.getOptionAddress().catch(unlessAuth(null)),
     api.geolocation.getOptionLocation().catch(unlessAuth(null)),
   ]);
-  return json({ address, location });
+  return json(coarseLocation(location, address, PRECISE_LOCATION));
 });
 
 server.registerTool("list_drivers", {
