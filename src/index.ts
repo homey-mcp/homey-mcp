@@ -7,6 +7,7 @@ import { getHomeyApi, resetHomeyApi } from "./homey.js";
 import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from "./lib/auth.js";
 import { READ, writeAnnotations } from "./lib/annotations.js";
 import { validateCapabilityWrite } from "./lib/capability.js";
+import { appId, insightLogId, isoDate, scriptId, scriptPath, uuid } from "./lib/ids.js";
 
 const ALLOW_SECURITY_CAPS = process.env.HOMEY_MCP_ALLOW_SECURITY_CAPS === "1";
 const ANN = writeAnnotations(ALLOW_SECURITY_CAPS);
@@ -83,7 +84,7 @@ server.registerTool("list_devices", {
 server.registerTool("get_device", {
   title: "Get Device Details",
   description: "Get detailed information about a specific device by ID, including all capability values, settings, and availability status. Use list_devices or search_devices first to find the device ID.",
-  inputSchema: { id: z.string().describe("Device ID (UUID format)") },
+  inputSchema: { id: uuid().describe("Device ID (UUID format)") },
   annotations: READ,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -116,8 +117,8 @@ server.registerTool("set_device_capability", {
   title: "Control Device",
   description: "Control a device by setting a capability value. Common capabilities: 'onoff' (boolean — turn on/off), 'dim' (number 0-1 — brightness), 'target_temperature' (number — thermostat setpoint), 'volume_set' (number 0-1). Use get_device first to see available capabilities and their current values. The value is checked against the capability's definition (must exist and be setable; type, min/max and enum values are enforced). Locks, garage doors and alarm capabilities are refused unless the server runs with HOMEY_MCP_ALLOW_SECURITY_CAPS=1.",
   inputSchema: {
-    deviceId: z.string().describe("Device ID"),
-    capability: z.string().describe("Capability ID (e.g. onoff, dim, target_temperature, volume_set)"),
+    deviceId: uuid().describe("Device ID"),
+    capability: z.string().regex(/^[A-Za-z0-9_]+(\.[A-Za-z0-9_-]+)*$/, "must be a capability id").describe("Capability ID (e.g. onoff, dim, target_temperature, volume_set)"),
     value: z.union([z.boolean(), z.number(), z.string()]).describe("Value to set (type depends on capability)"),
   },
   annotations: ANN.set_device_capability,
@@ -237,7 +238,7 @@ server.registerTool("audit_flows", {
 server.registerTool("get_flow", {
   title: "Get Flow Definition",
   description: "Get a flow's full WHEN/AND/THEN definition with device, zone and logic-variable references resolved to names. Each card shows its card id, arguments, the token it compares against (droptoken), whether it is inverted, and any delay. Use this to audit what a flow actually does — list_flows only returns names. Works for simple flows; advanced flows return their raw card graph.",
-  inputSchema: { id: z.string().describe("Flow ID (from list_flows)") },
+  inputSchema: { id: uuid().describe("Flow ID (from list_flows)") },
   annotations: READ,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -288,7 +289,7 @@ server.registerTool("get_flow", {
 server.registerTool("trigger_flow", {
   title: "Trigger Flow",
   description: "Trigger (run) a flow immediately by its ID. Tries simple flow first, then advanced flow. Use list_flows to find the flow ID.",
-  inputSchema: { id: z.string().describe("Flow ID") },
+  inputSchema: { id: uuid().describe("Flow ID") },
   annotations: ANN.trigger_flow,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -305,7 +306,7 @@ server.registerTool("set_flow_enabled", {
   title: "Enable/Disable Flow",
   description: "Enable or disable a flow automation. Disabled flows won't trigger. Use list_flows to find the flow ID.",
   inputSchema: {
-    id: z.string().describe("Flow ID"),
+    id: uuid().describe("Flow ID"),
     enabled: z.boolean().describe("true to enable, false to disable"),
   },
   annotations: ANN.set_flow_enabled,
@@ -334,7 +335,7 @@ server.registerTool("set_variable", {
   title: "Set Logic Variable",
   description: "Set the value of a logic variable. The value type must match the variable type (boolean, number, or string).",
   inputSchema: {
-    id: z.string().describe("Variable ID"),
+    id: uuid().describe("Variable ID"),
     value: z.union([z.boolean(), z.number(), z.string()]).describe("New value (must match variable type)"),
   },
   annotations: ANN.set_variable,
@@ -359,7 +360,7 @@ server.registerTool("list_apps", {
 server.registerTool("restart_app", {
   title: "Restart App",
   description: "Restart a Homey app. Useful when devices from that app are unresponsive. Use list_apps to find the app ID (e.g. 'com.fibaro').",
-  inputSchema: { id: z.string().describe("App ID (e.g. com.fibaro, nl.philips.hue)") },
+  inputSchema: { id: appId().describe("App ID (e.g. com.fibaro, nl.philips.hue)") },
   annotations: ANN.restart_app,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -371,7 +372,7 @@ server.registerTool("enable_app", {
   title: "Enable/Disable App",
   description: "Enable or disable a Homey app. Disabled apps won't run and their devices become unavailable.",
   inputSchema: {
-    id: z.string().describe("App ID"),
+    id: appId().describe("App ID"),
     enabled: z.boolean().describe("true to enable, false to disable"),
   },
   annotations: ANN.enable_app,
@@ -384,7 +385,7 @@ server.registerTool("enable_app", {
 server.registerTool("uninstall_app", {
   title: "Uninstall App",
   description: "Permanently uninstall a Homey app and remove all its devices. This cannot be undone.",
-  inputSchema: { id: z.string().describe("App ID") },
+  inputSchema: { id: appId().describe("App ID") },
   annotations: ANN.uninstall_app,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -401,15 +402,13 @@ server.registerTool("uninstall_app", {
 //   POST   /api/app/com.athom.homeyscript/script/:id/run  — execute stored script
 //   DELETE /api/app/com.athom.homeyscript/script/:id      — delete
 
-const HOMEYSCRIPT_BASE = "/api/app/com.athom.homeyscript";
-
 server.registerTool("list_scripts", {
   title: "List HomeyScripts",
   description: "List all HomeyScript scripts. Returns id, name, version, and last execution time. HomeyScript lets you run JavaScript against the Homey API from a flow or on demand.",
   annotations: READ,
 }, async () => {
   const api = await getHomeyApi();
-  const scripts = await api.call({ method: "GET", path: `${HOMEYSCRIPT_BASE}/script` });
+  const scripts = await api.call({ method: "GET", path: scriptPath() });
   const arr = Object.values(scripts) as Array<{ id: string; name: string; version?: number; lastExecuted?: string | null }>;
   return json({
     total: arr.length,
@@ -420,12 +419,12 @@ server.registerTool("list_scripts", {
 server.registerTool("get_script", {
   title: "Get HomeyScript",
   description: "Get a HomeyScript's full source code and metadata. Use list_scripts to discover IDs.",
-  inputSchema: { id: z.string().describe("Script ID (slug or UUID)") },
+  inputSchema: { id: scriptId().describe("Script ID (slug or UUID)") },
   annotations: READ,
 }, async ({ id }) => {
   const api = await getHomeyApi();
   try {
-    const script = await api.call({ method: "GET", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
+    const script = await api.call({ method: "GET", path: scriptPath(id) });
     return json(script);
   } catch (e: any) {
     if (isAuthError(e)) throw e;
@@ -439,7 +438,7 @@ server.registerTool("upsert_script", {
   title: "Create/Update HomeyScript",
   description: "Create a new HomeyScript or overwrite an existing one. Pass the `id` of an existing script to update it, or omit `id` to create a new script (the server assigns a UUID). HomeyScript code runs in a sandboxed environment with access to the global `Homey` API object and `log()`. Return a value with `return <x>` to expose it to the calling flow.",
   inputSchema: {
-    id: z.string().optional().describe("Existing script ID to update. Omit to create a new script — the server will assign a UUID."),
+    id: scriptId().optional().describe("Existing script ID to update. Omit to create a new script — the server will assign a UUID."),
     name: z.string().describe("Human-readable script name"),
     code: z.string().describe("JavaScript source code. Has access to the `Homey` API global, `log()`, and standard async/await."),
   },
@@ -449,14 +448,14 @@ server.registerTool("upsert_script", {
   if (id) {
     const result = await api.call({
       method: "PUT",
-      path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}`,
+      path: scriptPath(id),
       body: { name, code },
     });
     return json({ success: true, action: "updated", id, ...result });
   }
   const result = await api.call({
     method: "POST",
-    path: `${HOMEYSCRIPT_BASE}/script`,
+    path: scriptPath(),
     body: { name, code },
   });
   return json({ success: true, action: "created", ...result });
@@ -466,7 +465,7 @@ server.registerTool("run_script", {
   title: "Run HomeyScript",
   description: "Execute a stored HomeyScript and return its result. Returns `{ success, returns }` where `returns` is the script's return value, or `{ success: false, returns: { message, stack } }` on failure.",
   inputSchema: {
-    id: z.string().describe("Script ID to run"),
+    id: scriptId().describe("Script ID to run"),
     argument: z.string().optional().describe("Optional argument string passed to the script as `args[0]`"),
   },
   annotations: ANN.run_script,
@@ -474,7 +473,7 @@ server.registerTool("run_script", {
   const api = await getHomeyApi();
   const result = await api.call({
     method: "POST",
-    path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}/run`,
+    path: scriptPath(id, "run"),
     body: argument !== undefined ? { argument } : {},
     // HomeyScripts that actuate slow cloud devices (e.g. a Panasonic AC whose
     // setCapabilityValue round-trips ~7.5s) can legitimately run well past the
@@ -488,11 +487,11 @@ server.registerTool("run_script", {
 server.registerTool("delete_script", {
   title: "Delete HomeyScript",
   description: "Permanently delete a HomeyScript. Any flows still referencing it will become broken.",
-  inputSchema: { id: z.string().describe("Script ID to delete") },
+  inputSchema: { id: scriptId().describe("Script ID to delete") },
   annotations: ANN.delete_script,
 }, async ({ id }) => {
   const api = await getHomeyApi();
-  await api.call({ method: "DELETE", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
+  await api.call({ method: "DELETE", path: scriptPath(id) });
   return json({ success: true, id });
 });
 
@@ -513,7 +512,7 @@ server.registerTool("get_insight_entries", {
   title: "Get Insight History",
   description: "Get historical data points for an insight log. Returns timestamped values (e.g. temperature readings over time). Use list_insights first to find the log ID.",
   inputSchema: {
-    id: z.string().describe("Insight log ID (from list_insights)"),
+    id: insightLogId().describe("Insight log ID (from list_insights)"),
     resolution: z.enum(["last6Hours", "last24Hours", "last7Days", "last14Days", "last31Days", "last3Months", "lastYear"]).optional().describe("Time range (default: last24Hours)"),
   },
   annotations: READ,
@@ -539,7 +538,7 @@ server.registerTool("get_energy_report", {
   description: "Get energy consumption report for a specific period. Returns kWh consumed per device. Useful for 'how much energy did I use today/this week/this month?'",
   inputSchema: {
     period: z.enum(["day", "week", "month", "year"]).describe("Report period"),
-    date: z.string().optional().describe("Date in YYYY-MM-DD format (default: today)"),
+    date: isoDate().optional().describe("Date in YYYY-MM-DD format (default: today)"),
   },
   annotations: READ,
 }, async ({ period, date }) => {
@@ -645,9 +644,9 @@ server.registerTool("set_alarm", {
   title: "Create/Update Alarm",
   description: "Create a new alarm or update an existing one. Specify time in HH:MM format and optionally which days to repeat.",
   inputSchema: {
-    id: z.string().optional().describe("Alarm ID (omit to create new)"),
+    id: uuid().optional().describe("Alarm ID (omit to create new)"),
     name: z.string().describe("Alarm name"),
-    time: z.string().describe("Time in HH:MM format (24h)"),
+    time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "must be HH:MM (24h)").describe("Time in HH:MM format (24h)"),
     enabled: z.boolean().optional().describe("Enable/disable (default: true)"),
     repetition: z.object({ mon: z.boolean().optional(), tue: z.boolean().optional(), wed: z.boolean().optional(), thu: z.boolean().optional(), fri: z.boolean().optional(), sat: z.boolean().optional(), sun: z.boolean().optional() }).optional().describe("Days to repeat"),
   },
@@ -663,7 +662,7 @@ server.registerTool("set_alarm", {
 server.registerTool("delete_alarm", {
   title: "Delete Alarm",
   description: "Permanently delete an alarm. Use list_alarms to find the alarm ID.",
-  inputSchema: { id: z.string().describe("Alarm ID") },
+  inputSchema: { id: uuid().describe("Alarm ID") },
   annotations: ANN.delete_alarm,
 }, async ({ id }) => {
   const api = await getHomeyApi();
@@ -688,8 +687,8 @@ server.registerTool("set_mood", {
   title: "Activate Mood",
   description: "Activate a mood (scene) in a zone. This sets all devices in the mood to their saved states.",
   inputSchema: {
-    zoneId: z.string().describe("Zone ID"),
-    moodId: z.string().describe("Mood ID"),
+    zoneId: uuid().describe("Zone ID"),
+    moodId: uuid().describe("Mood ID"),
   },
   annotations: ANN.set_mood,
 }, async ({ zoneId, moodId }) => {
