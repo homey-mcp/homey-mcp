@@ -31,6 +31,30 @@ export function isRetrySafe(annotations: { readOnlyHint?: boolean; idempotentHin
   return annotations?.readOnlyHint === true || annotations?.idempotentHint === true;
 }
 
+/** Self-heal wrapper. Resolves the instance first, runs the handler, and on a
+ *  Homey auth rejection resets exactly that instance. A retry-safe handler is
+ *  re-run once against a fresh session; any other handler is not re-run,
+ *  because the rejection may have come after a side effect. A second failure
+ *  propagates. */
+export function withAuthRetry<A extends any[], R, T>(
+  handler: (...args: A) => Promise<R>,
+  opts: { getApi: () => Promise<T>; reset: (failed: T) => boolean; retrySafe: boolean },
+): (...args: A) => Promise<R> {
+  return async (...args: A): Promise<R> => {
+    const api = await opts.getApi();
+    try {
+      return await handler(...args);
+    } catch (e) {
+      if (!isAuthError(e)) throw e;
+      opts.reset(api);
+      if (!opts.retrySafe) {
+        throw new Error("The Homey session was rejected (401) and has been reset. This tool is not idempotent, so it was not re-run automatically: check whether it took effect before calling it again.");
+      }
+      return await handler(...args);
+    }
+  };
+}
+
 /** The Athom cloud relay is not a LAN address and must not be cached as one. */
 export function isLanAddress(address: string): boolean {
   try {

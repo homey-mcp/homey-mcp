@@ -3,36 +3,27 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getHomeyApi, resetHomeyApi, isAuthError } from "./homey.js";
+import { getHomeyApi, resetHomeyApi } from "./homey.js";
+import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from "./lib/auth.js";
+import { READ, writeAnnotations } from "./lib/annotations.js";
+
+const ALLOW_SECURITY_CAPS = process.env.HOMEY_MCP_ALLOW_SECURITY_CAPS === "1";
+const ANN = writeAnnotations(ALLOW_SECURITY_CAPS);
 
 const server = new McpServer({
   name: "homey-mcp",
   version: "2.3.0",
 });
 
-// Self-heal wrapper: every tool handler acquires `api` via getHomeyApi() at its
-// top. If a cached local session expired, the first Homey call throws 401. We
-// reset the auth (memo + on-disk cache) and re-run the handler once against a
-// freshly authenticated API. A second failure is real and propagates.
-function withAuthRetry<A extends any[], R>(handler: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
-  return async (...args: A): Promise<R> => {
-    // The instance the handler will use; a reset only applies if it is still
-    // current, so pipelined calls failing on one stale session re-auth once.
-    const api = await getHomeyApi();
-    try {
-      return await handler(...args);
-    } catch (e) {
-      if (!isAuthError(e)) throw e;
-      resetHomeyApi(api);
-      return await handler(...args);
-    }
-  };
-}
-
-// Wrap registerTool so every handler gets auth self-heal transparently.
+// Wrap registerTool so every handler gets auth self-heal: on a Homey 401 the
+// failed session is reset, and read-only or idempotent tools are re-run once
+// against a fresh one. Every tool that is not read-only must have an entry in
+// the annotation table, so its retry and confirmation behaviour is explicit.
 const _registerTool = server.registerTool.bind(server);
-(server as any).registerTool = (name: string, config: any, handler: any) =>
-  _registerTool(name, config, withAuthRetry(handler) as any);
+(server as any).registerTool = (name: string, config: any, handler: any) => {
+  if (config.annotations?.readOnlyHint !== true && !(name in ANN)) throw new Error(`tool ${name} has no annotations entry`);
+  return _registerTool(name, config, withAuthRetry(handler, { getApi: getHomeyApi, reset: resetHomeyApi, retrySafe: isRetrySafe(config.annotations) }) as any);
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -62,10 +53,6 @@ function json(data: any): { content: [{ type: "text"; text: string }] } {
 function err(msg: string): { content: [{ type: "text"; text: string }]; isError: true } {
   return { content: [{ type: "text", text: msg }], isError: true };
 }
-
-const READ = { readOnlyHint: true, destructiveHint: false } as const;
-const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true } as const;
-const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true } as const;
 
 // ── Devices ──────────────────────────────────────────────────────────
 
@@ -132,7 +119,7 @@ server.registerTool("set_device_capability", {
     capability: z.string().describe("Capability ID (e.g. onoff, dim, target_temperature, volume_set)"),
     value: z.union([z.boolean(), z.number(), z.string()]).describe("Value to set (type depends on capability)"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_device_capability,
 }, async ({ deviceId, capability, value }) => {
   const api = await getHomeyApi();
   const devices = await api.devices.getDevices();
@@ -163,10 +150,8 @@ server.registerTool("list_flows", {
 }, async () => {
   const api = await getHomeyApi();
   const flows = Object.values(await api.flow.getFlows()) as any[];
-  let advancedFlows: any[] = [];
-  try { advancedFlows = Object.values(await api.flow.getAdvancedFlows()) as any[]; } catch { /* may not be available */ }
-  let folders: Record<string, any> = {};
-  try { folders = await api.flow.getFlowFolders(); } catch { /* older firmware */ }
+  const advancedFlows = Object.values(await api.flow.getAdvancedFlows().catch(unlessAuth({}))) as any[]; // may not be available
+  const folders: Record<string, any> = await api.flow.getFlowFolders().catch(unlessAuth({})); // older firmware
   const folderName = (f: any) => folders[f.folder]?.name ?? null;
   return json({
     flows: flows.map((f) => ({ id: f.id, name: f.name, folder: folderName(f), enabled: f.enabled, broken: f.broken, type: "simple" })),
@@ -210,7 +195,7 @@ server.registerTool("audit_flows", {
         if (!cardDefs.has(key)) {
           const uri = c.uri ?? c.id.split(":").slice(0, -1).join(":");
           const getter = kind === "when" ? api.flow.getFlowCardTrigger : kind === "and" ? api.flow.getFlowCardCondition : api.flow.getFlowCardAction;
-          cardDefs.set(key, await getter.call(api.flow, { uri, id: c.id }).catch(() => null));
+          cardDefs.set(key, await getter.call(api.flow, { uri, id: c.id }).catch(unlessAuth(null)));
         }
         const def = cardDefs.get(key);
         for (const a of def?.args ?? []) {
@@ -254,8 +239,7 @@ server.registerTool("get_flow", {
 }, async ({ id }) => {
   const api = await getHomeyApi();
   const [devices, zones, variables] = await Promise.all([api.devices.getDevices(), api.zones.getZones(), api.logic.getVariables()]);
-  let folders: Record<string, any> = {};
-  try { folders = await api.flow.getFlowFolders(); } catch { /* older firmware */ }
+  const folders: Record<string, any> = await api.flow.getFlowFolders().catch(unlessAuth({})); // older firmware
   // Resolve every UUID inside a URI/token string to "<uuid> (Name)".
   const resolve = (s: unknown): unknown => typeof s === "string"
     ? s.replace(UUID_RE, (u) => {
@@ -287,14 +271,14 @@ server.registerTool("get_flow", {
       when: card(f.trigger), and: (f.conditions ?? []).map((c: any) => card(c)), then: (f.actions ?? []).map((a: any) => card(a, true)),
     });
   }
-  try {
-    const adv = (await api.flow.getAdvancedFlows())[id];
+  {
+    const adv = (await api.flow.getAdvancedFlows().catch(unlessAuth({} as Record<string, any>)))[id]; // advanced flows unavailable
     if (adv) {
       const cards: Record<string, unknown> = {};
       for (const [k, c] of Object.entries(adv.cards ?? {})) cards[k] = { ...card(c), type: (c as any).type, outputSuccess: (c as any).outputSuccess, outputError: (c as any).outputError };
       return json({ id: adv.id, name: adv.name, type: "advanced", folder: folders[adv.folder]?.name ?? null, enabled: adv.enabled, broken: adv.broken, cards });
     }
-  } catch { /* advanced flows unavailable */ }
+  }
   return err(`Flow ${id} not found`);
 });
 
@@ -302,12 +286,16 @@ server.registerTool("trigger_flow", {
   title: "Trigger Flow",
   description: "Trigger (run) a flow immediately by its ID. Tries simple flow first, then advanced flow. Use list_flows to find the flow ID.",
   inputSchema: { id: z.string().describe("Flow ID") },
-  annotations: WRITE,
+  annotations: ANN.trigger_flow,
 }, async ({ id }) => {
   const api = await getHomeyApi();
-  try { await api.flow.triggerFlow({ id }); return json({ success: true, id, type: "simple" }); } catch {
-    try { await api.flow.triggerAdvancedFlow({ id }); return json({ success: true, id, type: "advanced" }); } catch (e: any) { return err(e.message); }
+  // Fall back to the advanced-flow endpoint only when the simple flow does not
+  // exist; any other error (including a 401) is the real result.
+  try { await api.flow.triggerFlow({ id }); return json({ success: true, id, type: "simple" }); } catch (e) {
+    if (!isNotFound(e)) throw e;
   }
+  await api.flow.triggerAdvancedFlow({ id });
+  return json({ success: true, id, type: "advanced" });
 });
 
 server.registerTool("set_flow_enabled", {
@@ -317,12 +305,14 @@ server.registerTool("set_flow_enabled", {
     id: z.string().describe("Flow ID"),
     enabled: z.boolean().describe("true to enable, false to disable"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_flow_enabled,
 }, async ({ id, enabled }) => {
   const api = await getHomeyApi();
-  try { await api.flow.updateFlow({ id, flow: { enabled } }); return json({ success: true, id, enabled, type: "simple" }); } catch {
-    try { await api.flow.updateAdvancedFlow({ id, advancedflow: { enabled } }); return json({ success: true, id, enabled, type: "advanced" }); } catch (e: any) { return err(e.message); }
+  try { await api.flow.updateFlow({ id, flow: { enabled } }); return json({ success: true, id, enabled, type: "simple" }); } catch (e) {
+    if (!isNotFound(e)) throw e;
   }
+  await api.flow.updateAdvancedFlow({ id, advancedflow: { enabled } });
+  return json({ success: true, id, enabled, type: "advanced" });
 });
 
 // ── Logic Variables ──────────────────────────────────────────────────
@@ -344,7 +334,7 @@ server.registerTool("set_variable", {
     id: z.string().describe("Variable ID"),
     value: z.union([z.boolean(), z.number(), z.string()]).describe("New value (must match variable type)"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_variable,
 }, async ({ id, value }) => {
   const api = await getHomeyApi();
   await api.logic.updateVariable({ id, variable: { value } });
@@ -367,7 +357,7 @@ server.registerTool("restart_app", {
   title: "Restart App",
   description: "Restart a Homey app. Useful when devices from that app are unresponsive. Use list_apps to find the app ID (e.g. 'com.fibaro').",
   inputSchema: { id: z.string().describe("App ID (e.g. com.fibaro, nl.philips.hue)") },
-  annotations: WRITE,
+  annotations: ANN.restart_app,
 }, async ({ id }) => {
   const api = await getHomeyApi();
   await api.apps.restartApp({ id });
@@ -381,7 +371,7 @@ server.registerTool("enable_app", {
     id: z.string().describe("App ID"),
     enabled: z.boolean().describe("true to enable, false to disable"),
   },
-  annotations: WRITE,
+  annotations: ANN.enable_app,
 }, async ({ id, enabled }) => {
   const api = await getHomeyApi();
   if (enabled) await api.apps.enableApp({ id }); else await api.apps.disableApp({ id });
@@ -392,7 +382,7 @@ server.registerTool("uninstall_app", {
   title: "Uninstall App",
   description: "Permanently uninstall a Homey app and remove all its devices. This cannot be undone.",
   inputSchema: { id: z.string().describe("App ID") },
-  annotations: DESTRUCTIVE,
+  annotations: ANN.uninstall_app,
 }, async ({ id }) => {
   const api = await getHomeyApi();
   await api.apps.uninstallApp({ id });
@@ -435,7 +425,10 @@ server.registerTool("get_script", {
     const script = await api.call({ method: "GET", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
     return json(script);
   } catch (e: any) {
-    return err(`Script ${id} not found: ${e.message}`);
+    if (isAuthError(e)) throw e;
+    // HomeyScript answers a missing id with 500 "Script Not Found"
+    const missing = isNotFound(e) || /^script not found$/i.test(String(e?.message ?? "").trim());
+    return err(missing ? `Script ${id} not found` : `Could not read script ${id}: ${e.message}`);
   }
 });
 
@@ -447,7 +440,7 @@ server.registerTool("upsert_script", {
     name: z.string().describe("Human-readable script name"),
     code: z.string().describe("JavaScript source code. Has access to the `Homey` API global, `log()`, and standard async/await."),
   },
-  annotations: WRITE,
+  annotations: ANN.upsert_script,
 }, async ({ id, name, code }) => {
   const api = await getHomeyApi();
   if (id) {
@@ -473,7 +466,7 @@ server.registerTool("run_script", {
     id: z.string().describe("Script ID to run"),
     argument: z.string().optional().describe("Optional argument string passed to the script as `args[0]`"),
   },
-  annotations: WRITE,
+  annotations: ANN.run_script,
 }, async ({ id, argument }) => {
   const api = await getHomeyApi();
   const result = await api.call({
@@ -493,7 +486,7 @@ server.registerTool("delete_script", {
   title: "Delete HomeyScript",
   description: "Permanently delete a HomeyScript. Any flows still referencing it will become broken.",
   inputSchema: { id: z.string().describe("Script ID to delete") },
-  annotations: DESTRUCTIVE,
+  annotations: ANN.delete_script,
 }, async ({ id }) => {
   const api = await getHomeyApi();
   await api.call({ method: "DELETE", path: `${HOMEYSCRIPT_BASE}/script/${encodeURIComponent(id)}` });
@@ -594,7 +587,7 @@ server.registerTool("set_presence", {
     present: z.boolean().optional().describe("true = home, false = away"),
     asleep: z.boolean().optional().describe("true = asleep, false = awake"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_presence,
 }, async ({ present, asleep }) => {
   const api = await getHomeyApi();
   if (present !== undefined) await api.presence.setPresentMe({ present });
@@ -619,7 +612,7 @@ server.registerTool("create_notification", {
   title: "Send Notification",
   description: "Send a notification to the Homey timeline. Visible in the Homey app for all household members.",
   inputSchema: { excerpt: z.string().describe("Notification message text") },
-  annotations: WRITE,
+  annotations: ANN.create_notification,
 }, async ({ excerpt }) => {
   const api = await getHomeyApi();
   // homey-api's web client exposes no notifications.createNotification (only
@@ -655,7 +648,7 @@ server.registerTool("set_alarm", {
     enabled: z.boolean().optional().describe("Enable/disable (default: true)"),
     repetition: z.object({ mon: z.boolean().optional(), tue: z.boolean().optional(), wed: z.boolean().optional(), thu: z.boolean().optional(), fri: z.boolean().optional(), sat: z.boolean().optional(), sun: z.boolean().optional() }).optional().describe("Days to repeat"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_alarm,
 }, async ({ id, name, time, enabled, repetition }) => {
   const api = await getHomeyApi();
   const alarm = { name, time, enabled: enabled ?? true, repetition: repetition ?? {} };
@@ -668,7 +661,7 @@ server.registerTool("delete_alarm", {
   title: "Delete Alarm",
   description: "Permanently delete an alarm. Use list_alarms to find the alarm ID.",
   inputSchema: { id: z.string().describe("Alarm ID") },
-  annotations: DESTRUCTIVE,
+  annotations: ANN.delete_alarm,
 }, async ({ id }) => {
   const api = await getHomeyApi();
   await api.alarms.deleteAlarm({ id });
@@ -695,7 +688,7 @@ server.registerTool("set_mood", {
     zoneId: z.string().describe("Zone ID"),
     moodId: z.string().describe("Mood ID"),
   },
-  annotations: WRITE,
+  annotations: ANN.set_mood,
 }, async ({ zoneId, moodId }) => {
   const api = await getHomeyApi();
   await api.moods.setMood({ zone: zoneId, mood: moodId });
@@ -720,8 +713,8 @@ server.registerTool("get_location", {
 }, async () => {
   const api = await getHomeyApi();
   const [address, location] = await Promise.all([
-    api.geolocation.getOptionAddress().catch(() => null),
-    api.geolocation.getOptionLocation().catch(() => null),
+    api.geolocation.getOptionAddress().catch(unlessAuth(null)),
+    api.geolocation.getOptionLocation().catch(unlessAuth(null)),
   ]);
   return json({ address, location });
 });
@@ -752,8 +745,8 @@ server.registerTool("get_backup_status", {
 }, async () => {
   const api = await getHomeyApi();
   const [autoEnabled, lastBackup] = await Promise.all([
-    api.backup.getOptionAutomaticBackupsEnabled().catch(() => null),
-    api.backup.getOptionLastSuccessfulBackup().catch(() => null),
+    api.backup.getOptionAutomaticBackupsEnabled().catch(unlessAuth(null)),
+    api.backup.getOptionLastSuccessfulBackup().catch(unlessAuth(null)),
   ]);
   return json({ automaticBackupsEnabled: autoEnabled?.value, lastSuccessfulBackup: lastBackup?.value });
 });
@@ -761,7 +754,7 @@ server.registerTool("get_backup_status", {
 server.registerTool("create_backup", {
   title: "Create Backup",
   description: "Schedule a new backup of the Homey configuration. Backup runs in the background.",
-  annotations: WRITE,
+  annotations: ANN.create_backup,
 }, async () => {
   const api = await getHomeyApi();
   await api.backup.scheduleBackup();
@@ -774,7 +767,7 @@ server.registerTool("get_ledring", {
   annotations: READ,
 }, async () => {
   const api = await getHomeyApi();
-  const [screensavers, current] = await Promise.all([api.ledring.getScreensavers(), api.ledring.getOptionScreensaver().catch(() => null)]);
+  const [screensavers, current] = await Promise.all([api.ledring.getScreensavers(), api.ledring.getOptionScreensaver().catch(unlessAuth(null))]);
   return json({ current: current?.value, screensavers: Object.values(screensavers).map((s: any) => ({ id: s.id, name: s.name })) });
 });
 
@@ -782,7 +775,7 @@ server.registerTool("set_ledring", {
   title: "Set LED Ring",
   description: "Set the LED ring screensaver animation. Use get_ledring to see available options (e.g. 'spectrum', 'off').",
   inputSchema: { screensaverId: z.string().describe("Screensaver ID (e.g. 'spectrum', 'off')") },
-  annotations: WRITE,
+  annotations: ANN.set_ledring,
 }, async ({ screensaverId }) => {
   const api = await getHomeyApi();
   await api.ledring.setOptionScreensaver({ value: { uri: "homey:manager:ledring", id: screensaverId } });
@@ -796,9 +789,9 @@ server.registerTool("get_updates", {
 }, async () => {
   const api = await getHomeyApi();
   const [channel, autoupdate, updates] = await Promise.all([
-    api.updates.getOptionChannel().catch(() => null),
-    api.updates.getOptionAutoupdate().catch(() => null),
-    api.updates.getUpdates().catch(() => []),
+    api.updates.getOptionChannel().catch(unlessAuth(null)),
+    api.updates.getOptionAutoupdate().catch(unlessAuth(null)),
+    api.updates.getUpdates().catch(unlessAuth([])),
   ]);
   return json({ channel: channel?.value, autoupdate: autoupdate?.value, pendingUpdates: updates });
 });
@@ -816,7 +809,7 @@ server.registerTool("get_session", {
 server.registerTool("reboot_homey", {
   title: "Reboot Homey",
   description: "Reboot the Homey Pro. Takes 2-3 minutes to come back online. Use this to resolve stale devices or Z-Wave/Zigbee mesh issues after firmware updates.",
-  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  annotations: ANN.reboot_homey,
 }, async () => {
   const api = await getHomeyApi();
   await api.system.reboot();
@@ -845,7 +838,7 @@ server.registerTool("set_system_name", {
   title: "Set System Name",
   description: "Set the Homey system name (visible in network discovery and the Homey app).",
   inputSchema: { name: z.string().describe("New system name") },
-  annotations: WRITE,
+  annotations: ANN.set_system_name,
 }, async ({ name }) => {
   const api = await getHomeyApi();
   await api.system.setSystemName({ name });

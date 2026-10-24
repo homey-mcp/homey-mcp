@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ApiHolder, isAuthError, isNotFound, unlessAuth, isRetrySafe, isLanAddress, isGroupOrWorldAccessible } from "../src/lib/auth.js";
+import { ApiHolder, isAuthError, isNotFound, unlessAuth, isRetrySafe, isLanAddress, isGroupOrWorldAccessible, withAuthRetry } from "../src/lib/auth.js";
 
 test("isAuthError matches statusCode 401 and the exact session-not-found message only", () => {
   assert.equal(isAuthError({ statusCode: 401, message: "whatever" }), true);
@@ -106,4 +106,41 @@ test("ApiHolder: a failed authentication is not cached", async () => {
   await assert.rejects(holder.get(), /offline/);
   assert.deepEqual(await holder.get(), { ok: true });
   assert.equal(calls, 2);
+});
+
+test("withAuthRetry re-runs a retry-safe handler once after resetting the failed instance", async () => {
+  const resets: unknown[] = [];
+  const api = { n: 1 };
+  let runs = 0;
+  const wrapped = withAuthRetry(async () => { runs++; if (runs === 1) throw { statusCode: 401 }; return "ok"; },
+    { getApi: async () => api, reset: (a) => { resets.push(a); return true; }, retrySafe: true });
+  assert.equal(await wrapped(), "ok");
+  assert.equal(runs, 2);
+  assert.deepEqual(resets, [api]);
+});
+
+test("withAuthRetry does not re-run a non-idempotent handler but still resets the session", async () => {
+  let runs = 0; let resets = 0;
+  const wrapped = withAuthRetry(async () => { runs++; throw { statusCode: 401, message: "Session not found" }; },
+    { getApi: async () => ({}), reset: () => { resets++; return true; }, retrySafe: false });
+  await assert.rejects(wrapped(), /not re-run/);
+  assert.equal(runs, 1);
+  assert.equal(resets, 1);
+});
+
+test("withAuthRetry passes other errors through untouched and does not reset", async () => {
+  let resets = 0;
+  const boom = new Error("Unauthorized by cloud driver");
+  const wrapped = withAuthRetry(async () => { throw boom; },
+    { getApi: async () => ({}), reset: () => { resets++; return true; }, retrySafe: true });
+  await assert.rejects(wrapped(), (e) => e === boom);
+  assert.equal(resets, 0);
+});
+
+test("withAuthRetry: a second auth failure propagates", async () => {
+  let runs = 0;
+  const wrapped = withAuthRetry(async () => { runs++; throw { statusCode: 401 }; },
+    { getApi: async () => ({}), reset: () => true, retrySafe: true });
+  await assert.rejects(wrapped(), (e: any) => e.statusCode === 401);
+  assert.equal(runs, 2);
 });
