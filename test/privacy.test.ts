@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickSystemInfo, coarseLocation } from "../src/lib/privacy.js";
+import { pickSystemInfo, coarseLocation, dateInTimeZone } from "../src/lib/privacy.js";
 
 test("pickSystemInfo drops network identifiers, cloud id and hostname", () => {
   const info = {
@@ -38,4 +38,18 @@ test("coarseLocation returns exact data when precise is allowed", () => {
 
 test("coarseLocation handles missing data", () => {
   assert.deepEqual(coarseLocation(null, null, false), { address: null, location: null, precise: false });
+});
+
+test("dateInTimeZone uses the local date, not UTC", () => {
+  // 00:30 on 25 Oct in Stockholm (CEST, UTC+2) is still 24 Oct in UTC
+  const d = new Date("2026-10-24T22:30:00Z");
+  assert.equal(dateInTimeZone(d, "Europe/Stockholm"), "2026-10-25");
+  assert.equal(dateInTimeZone(d, "UTC"), "2026-10-24");
+  assert.equal(dateInTimeZone(new Date("2026-01-01T23:30:00Z"), "America/New_York"), "2026-01-01");
+});
+
+test("dateInTimeZone falls back to the process time zone for an unknown zone", () => {
+  const d = new Date("2026-06-15T12:00:00Z");
+  assert.equal(dateInTimeZone(d, "Not/AZone"), dateInTimeZone(d));
+  assert.match(dateInTimeZone(d), /^\d{4}-\d{2}-\d{2}$/);
 });

@@ -8,7 +8,7 @@ import { isAuthError, isNotFound, isRetrySafe, unlessAuth, withAuthRetry } from 
 import { READ, writeAnnotations } from "./lib/annotations.js";
 import { validateCapabilityWrite } from "./lib/capability.js";
 import { cleanString, sanitize } from "./lib/sanitize.js";
-import { coarseLocation, pickSystemInfo } from "./lib/privacy.js";
+import { coarseLocation, dateInTimeZone, pickSystemInfo } from "./lib/privacy.js";
 import { appId, insightLogId, isoDate, scriptId, scriptPath, uuid } from "./lib/ids.js";
 
 const ALLOW_SECURITY_CAPS = process.env.HOMEY_MCP_ALLOW_SECURITY_CAPS === "1";
@@ -553,12 +553,13 @@ server.registerTool("get_energy_report", {
   description: "Get energy consumption report for a specific period. Returns kWh consumed per device. Useful for 'how much energy did I use today/this week/this month?'",
   inputSchema: {
     period: z.enum(["day", "week", "month", "year"]).describe("Report period"),
-    date: isoDate().optional().describe("Date in YYYY-MM-DD format (default: today)"),
+    date: isoDate().optional().describe("Date in YYYY-MM-DD format (default: today in the Homey's time zone)"),
   },
   annotations: READ,
 }, async ({ period, date }) => {
   const api = await getHomeyApi();
-  const d = date ?? new Date().toISOString().split("T")[0];
+  // "Today" is the Homey's local date, not the UTC one.
+  const d = date ?? dateInTimeZone(new Date(), (await api.system.getInfo().catch(unlessAuth(null)))?.timezone);
   const fn = { day: "getReportDay", week: "getReportWeek", month: "getReportMonth", year: "getReportYear" }[period];
   return json(await api.energy[fn]({ date: d }));
 });

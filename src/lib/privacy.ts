@@ -30,3 +30,14 @@ export function coarseLocation(location: any, address: any, precise: boolean): {
     precise,
   };
 }
+
+/** YYYY-MM-DD for `date` in the given IANA time zone (the Homey's own), or
+ *  the process time zone when none or an unknown one is given. */
+export function dateInTimeZone(date: Date, timeZone?: string): string {
+  const fmt = (tz?: string) => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+  try {
+    return fmt(timeZone);
+  } catch {
+    return fmt();
+  }
+}
