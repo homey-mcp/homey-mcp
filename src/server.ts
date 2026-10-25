@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { getHomeyApi, resetHomeyApi, withPinnedApi } from "./homey.js";
@@ -55,6 +56,8 @@ function err(msg: string): { content: [{ type: "text"; text: string }]; isError:
   return { content: [{ type: "text", text: cleanString(msg, MAX_STRING) }], isError: true };
 }
 
+const { version: VERSION } = createRequire(import.meta.url)("../package.json") as { version: string };
+
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 // Card definitions are fetched with bounded concurrency; one per unique card.
 const CARD_DEF_CONCURRENCY = 8;
@@ -67,7 +70,7 @@ const lookups = new TtlCache(10_000);
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "homey-mcp",
-    version: "3.0.0",
+    version: VERSION,
   }, { instructions: INSTRUCTIONS });
 
   // Wrap registerTool so every handler gets auth self-heal: on a Homey 401 the
