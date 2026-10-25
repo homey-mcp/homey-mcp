@@ -13,6 +13,7 @@ Built on MCP TypeScript SDK v2. One stdio binary serves clients on the 2026-07-2
 3.0.0 moves to SDK v2 and rolls up the hardening from the 2.4 line:
 
 - **MCP SDK v2 and protocol 2026-07-28.** `@modelcontextprotocol/sdk` is replaced by `@modelcontextprotocol/server` 2.x. The server starts through `serveStdio`, so 2026-07-28 and 2025-era clients both connect. Tool names, input shapes, annotations and prompts are unchanged; advertised input schemas now declare JSON Schema 2020-12.
+- **Client-visible protocol changes from SDK v2.** Calling an unknown tool name now fails with JSON-RPC error -32602 instead of returning an `isError` result. Tool error text no longer starts with `MCP error <code>: `. Input-validation messages put the field path first (`id: must be a UUID`). Tools no longer advertise `execution.taskSupport`.
 - **Node.js 22** is the minimum (`engines.node >=22`), matching homey-api 3.21.
 - **zod 4** for every input schema.
 - **Security capabilities are gated.** `set_device_capability` refuses locks, garage doors, home alarms and `alarm_*` capabilities unless `HOMEY_MCP_ALLOW_SECURITY_CAPS=1`, and checks every write against the capability definition.
