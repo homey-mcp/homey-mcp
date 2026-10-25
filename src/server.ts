@@ -67,7 +67,7 @@ const lookups = new TtlCache(10_000);
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "homey-mcp",
-    version: "2.4.0",
+    version: "3.0.0",
   }, { instructions: INSTRUCTIONS });
 
   // Wrap registerTool so every handler gets auth self-heal: on a Homey 401 the
