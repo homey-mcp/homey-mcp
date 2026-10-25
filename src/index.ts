@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { createServer } from "./server.js";
 
-await createServer().connect(new StdioServerTransport());
+// One entry for both protocol generations: the opening exchange selects
+// 2026-07-28 (server/discover) or the 2025-era initialize handshake.
+serveStdio(() => createServer());
