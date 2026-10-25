@@ -6,6 +6,21 @@ MCP server for controlling [Homey Pro](https://homey.app/) smart home systems th
 
 50 tools and 3 knowledge prompts for device control, automation, monitoring, troubleshooting, and more.
 
+Built on MCP TypeScript SDK v2. One stdio binary serves clients on the 2026-07-28 protocol revision and 2025-era clients (including clients on the v1 SDK); the era is chosen per connection. Requires Node.js 22 or later.
+
+## Changes in 3.0.0
+
+3.0.0 moves to SDK v2 and rolls up the hardening from the 2.4 line:
+
+- **MCP SDK v2 and protocol 2026-07-28.** `@modelcontextprotocol/sdk` is replaced by `@modelcontextprotocol/server` 2.x. The server starts through `serveStdio`, so 2026-07-28 and 2025-era clients both connect. Tool names, input shapes, annotations and prompts are unchanged; advertised input schemas now declare JSON Schema 2020-12.
+- **Node.js 22** is the minimum (`engines.node >=22`), matching homey-api 3.21.
+- **zod 4** for every input schema.
+- **Security capabilities are gated.** `set_device_capability` refuses locks, garage doors, home alarms and `alarm_*` capabilities unless `HOMEY_MCP_ALLOW_SECURITY_CAPS=1`, and checks every write against the capability definition.
+- **Id validation.** Device, flow, zone, variable, alarm and mood ids must be UUIDs; app, script and insight ids are checked by pattern before they reach the Homey API.
+- **Privacy filtering.** `get_system_info` leaves out network identifiers, the hostname and the cloud id; `get_location` rounds coordinates and drops the street address unless `HOMEY_MCP_PRECISE_LOCATION=1`.
+- **Auth precedence.** `HOMEY_ADDRESS` plus `HOMEY_TOKEN` is tried first and, when set, is the only source used; then the cached LAN session, then the Homey CLI token.
+- **New `audit_flows` checks:** advanced flows, logic variable, HomeyScript and target-flow references held in card arguments, numbers stored in text arguments, missing required arguments, and flows that mix grouped and ungrouped conditions.
+
 ## Quick Start
 
 ```bash
@@ -190,7 +205,7 @@ npm run dev        # Run with tsx (no build step)
 npm run build      # Compile TypeScript
 npm run lint       # ESLint
 npm run typecheck  # TypeScript strict check
-npm test           # Unit tests (node:test via tsx)
+npm test           # Build, then unit and stdio compatibility tests (node:test via tsx)
 npm start          # Run compiled version
 ```
 
@@ -198,7 +213,7 @@ npm start          # Run compiled version
 
 - TypeScript + Node.js (≥22)
 - [homey-api](https://www.npmjs.com/package/homey-api) v3 — Official Homey Web API client
-- [@modelcontextprotocol/sdk](https://www.npmjs.com/package/@modelcontextprotocol/sdk) v1.32 — MCP server (`registerTool` with `ToolAnnotations`)
+- [@modelcontextprotocol/server](https://www.npmjs.com/package/@modelcontextprotocol/server) v2 — MCP server (`registerTool` with `ToolAnnotations`, `serveStdio` for protocol 2026-07-28 and 2025-era clients)
 - [zod](https://www.npmjs.com/package/zod) v4 — Parameter validation
 
 ## License
